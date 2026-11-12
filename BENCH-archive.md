@@ -3554,3 +3554,30 @@ and 8/20 here, `groot-19b-iq4xs` 9 → 7; the JavaScript set that passed for eve
 three arms today. Aider N=20 single-run counts move by up to 5 between days — only the paired
 same-session matrix is evidence, and the "gpt-oss-high is the runner-up" reading of 11-05 is a
 one-session result.
+
+## Qwen3.8 Flash-Next (180B MoE) on llamAmpere v0.6.4 — first look, 2026-11-11
+
+Engine: `JakeATX/llamAmpere` v0.6.4 (a5d8684ce), scratch build `/mnt/cc/strata/llamampere/build`
+(CUDA 13.4, gcc 16.2, `120a-real`; upstream tests sm_86 only). Model:
+`jakeatx/qwen3.8-flash-next-Swift1.5-ATX-AI3` (74.6 GiB, SHA-256 verified) + drafter
+`mtp-Swift-Qwen3.8-Flash-Next-GSQ-RCO-Q2S-B.gguf`; part 1 on /mnt/db1, part 2 on /mnt/db5 (HDD).
+Launcher `scripts/flash-next-server.sh`, port 8099, inside a 54 GiB scope. Clients: `bench_11`
+(`URL=`, `NEEDLE=1`), `bench_14` (`URL=`). Logs: `/mnt/cc/strata/llamampere/server-run{1..5}.log`,
+`bench11-*.log`, `bench14/`. One session, N=1-2 per cell.
+
+| arm | load | 1K needle | 8K needle | 24K needle | pp tok/s @16K | tg tok/s (512 tok) |
+|---|---|---|---|---|---|---|
+| launcher defaults, `-c 110592` | 3 min 53 s, experts NOT pinned (45.9 GiB available) | - | - | - | 0.11 (30 tok) | 0.4-0.8, HDD thrash |
+| `-c 32768 --cache-ram 0 -t 16` | 5 min 56 s, pinned | OK | **MISS** | **MISS** | 900-940 (24K) | 57-59 (short chat) |
+| same + `LLAMA_B1=0` | 6 min 53 s | OK | **MISS** | **MISS** | 615-625 (24K) | - |
+| same + `--exact` + `LLAMA_SMALL_CARD_AUTO=0 LLAMA_LEAN_PROMPT=0` | 6 min 52 s | OK | OK | OK | 780 | 47-49 |
+| `--exact -c 32768 --cache-ram 0 -t 16` | ~7 min | OK | OK | OK | 2260-2380 | 44-46 |
+
+Reading. (1) The default 110K-context plan does not fit 62 GiB RAM + 16 GB VRAM: the arena could not
+pin its 43 GiB of host experts, the page cache could not hold both shards and generation ran at disk
+speed. At 32K context the experts pin (host left with ~9 GiB available, card 14.3 GB). (2) With the
+shipped shortcuts on (`--moe-skip`, mb-MTP) prompts of 8K tokens and more return 2-5 junk tokens; up
+to 6K they pass. `LLAMA_B1=0` does not change that; `--exact` alone does, and keeps the layer-major
+prompt path. Which of the two shortcuts is at fault was not separated. (3) `bench_14_tools` 6/6 on
+the first exact arm. No Xid, no OOM kill. Draft acceptance 0.54-0.64, mean accepted length 2.7-2.9.
+Not done: agent benches (bench_05/12), a context above 32K, a same-session comparison with the leader.
