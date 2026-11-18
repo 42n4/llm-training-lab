@@ -3581,3 +3581,68 @@ to 6K they pass. `LLAMA_B1=0` does not change that; `--exact` alone does, and ke
 prompt path. Which of the two shortcuts is at fault was not separated. (3) `bench_14_tools` 6/6 on
 the first exact arm. No Xid, no OOM kill. Draft acceptance 0.54-0.64, mean accepted length 2.7-2.9.
 Not done: agent benches (bench_05/12), a context above 32K, a same-session comparison with the leader.
+
+## 2026-11-17 — BitNet b1.58 2B-4T on the CPU: first look as an agent candidate
+
+Question: is a 1.58-bit (ternary) model worth anything as a local agent. Setup: microsoft/BitNet 0b341e5
+(2026-07-27) with its pinned llama.cpp fork isHuangXin/llama.cpp 390c307, built with clang 22 inside a
+no-network bwrap box (`-DBITNET_X86_TL2=OFF`, kernels from `codegen_tl2.py`); model
+`microsoft/bitnet-b1.58-2B-4T-gguf` `ggml-model-i2_s.gguf` (1.19 GB, 2.41 B params, context 4096). Tree, model,
+logs, templates and the patch: `/mnt/db1/bitnet/`.
+
+| Measurement | Result |
+|---|---|
+| llama-bench, 5950X, 8 threads | pp512 364.8, tg128 21.1 tok/s |
+| llama-bench, 16 threads | pp512 561.4, tg128 22.3 tok/s (generation does not scale past 8 threads) |
+| fork as pinned, GGUF's own template | gibberish (rows of backticks): the embedded template ends the prompt with an EOS |
+| fork as pinned, model-card template | loops ("The sky is blue because it is a color that is blue" repeated) |
+| + one-line patch (`relu2.patch`) | coherent: Rayleigh scattering in 3 sentences, `grep -i "ERROR" app.log \| wc -l`, a correct Fibonacci function; a wrong answer on the `set -euo pipefail` + grep question |
+| bench_14, model-card template | preflight FAILED: the template has no tool section, the server drops `tools` |
+| bench_14, own tool template (`tools.jinja`, `<tool_call>` JSON) | **1/6** (`recover` only): every call arrives as content, `tool_calls` empty |
+| the same five answers read by hand | simple, nested, parallel carry the right function and arguments with broken closing tags; `decline` invents "New York"; `longarg` is malformed |
+| bench_05 / bench_12 | not run: qwen-code's system prompt and tool list do not fit a 4096-token context |
+
+Cause of the bad output: at 390c307 `llama_model_bitnet_b158` inherits the older `bitnet` graph, whose FFN is
+`LLM_FFN_SILU`; 2B-4T was trained with squared ReLU. The patch selects `LLM_FFN_RELU_SQR` for
+`LLM_ARCH_BITNET_B158`. Not verified: that the patched build matches the reference quality (no perplexity run
+against the bf16 weights). Mainline b12266 has the same SiLU line and no `i2_s` type.
+
+Verdict: not an agent. No tool training, a fabricated argument when information is missing, 4K context, and no
+GPU server path. What it is: a 1.2 GB model that chats at ~22 tok/s on the CPU alone (a 9B Q8 on the
+GPU gives ~75 tok/s with tools and 128K context). Possible narrow use: a CPU-side classifier or router that leaves the GPU
+free, if a bench shows it beats a 0.6-1B conventional model at that job. Larger ternary models (Falcon3 7B / 10B
+1.58bit, i2_s 3.3 / 4.0 GB) were not tried.
+
+### 2026-11-17 addendum — Falcon3-10B 1.58bit as an agent, and small models as a CPU-side router
+
+Two follow-ups asked by the user. Same patched fork build for the ternary models, mainline b12266 with
+`CUDA_VISIBLE_DEVICES=` for the conventional ones, 16 threads, launcher `/mnt/db1/bitnet/serve.sh`.
+
+**Falcon3-10B-Instruct-1.58bit** (`ggml-model-i2_s.gguf` 3.99 GB, arch `llama`, 10.31 B params, context 32K, served at
+16K): 8.5 tok/s generation, 85-130 tok/s prompt. Chat is coherent (`grep -c "ERROR" app.log`; right on the
+`pipefail` + grep question). bench_14 with the model card's tool template: **3/6**. `simple`, `nested`, `parallel`
+pass, but `simple` returns the same call repeated until the token limit (the check only reads the first) and
+`parallel` spells the city "Crakow"; `longarg` makes no call; `recover` echoes the question; `decline` calls with
+an invented "New York".
+
+**Router bench** (`bench_15_router.py`, new): 364 trigger phrases of 14 local skills (187 English, 177 Polish) taken
+from the skills' own "Triggers on:" lists; the model sees each skill's purpose without that list and must name the
+skill; answer grammar-constrained to the 14 names; temperature 0; chance 7.1 %.
+
+| Model | Where | Size | All | English | Polish | Median ms / decision |
+|---|---|---|---|---|---|---|
+| ornith15-9b Q8_0 | GPU | 9.5 GB | **82.1 %** | 84.5 | 79.7 | 224 |
+| Qwen3-1.7B Q4_K_M (`--no-think`) | CPU | 1.11 GB | 45.6 % | 54.0 | 36.7 | 342 |
+| Qwen3-0.6B Q8_0 (`--no-think`) | CPU | 0.64 GB | 43.1 % | 47.6 | 38.4 | 269 |
+| BitNet b1.58 2B-4T i2_s | CPU | 1.19 GB | 40.1 % | 48.7 | 31.1 | 376 |
+| Gemma 3 1B Q8_0 | CPU | 1.07 GB | 37.4 % | 40.6 | 33.9 | 326 |
+| Falcon3-10B 1.58bit i2_s | CPU | 3.99 GB | 21.2 % | 23.0 | 19.2 | 939 |
+
+Reading: with 364 items one score carries about +-2.6 points, so the four ~1 GB CPU models are not separable; the
+ternary 2B is neither better nor faster than a conventional 0.6 B at half its size. BitNet without the grammar:
+26.6 %, 115 answers name no skill. Falcon3 answered the first skill in the list 225 times. Trap fixed while running:
+Qwen3 under a grammar cannot open `<think>` and returns one constant label (1.7B: "shader" 364 times, score = chance)
+until thinking is switched off; check the answer spread before believing a chance-level score.
+
+Verdict: neither use holds. As a router a ~1 GB CPU model gets under half of what the 9B on the GPU gets, at a
+slower decision; and a 9B decision costs the GPU 0.2 s. Ternary weights buy small files, not capability, at this size.
