@@ -13,6 +13,28 @@ with MoE CPU/GPU hybrid offload tuned for 16 GB VRAM (RTX 5070 Ti) + 64 GB RAM.
 | `bench_06_dense_generic.sh` | mainline llama.cpp, any dense (non-MoE) model — bench_04 generalized, per-depth loop so one OOM doesn't kill the sweep | `llama-bench`, `llama-server` |
 | `bench_07_workflow.sh` | agentic **workflow discipline** (any aillama profile) — the failure axes bench_05 is blind to | `qwen` (qwen-code), `aillama` |
 
+## Stages by name (`bench_run`, added 2026-11-23)
+
+The `bench_NN` numbers are the order the scripts were written in, not the order a candidate goes
+through them. The numbers stay, because every result below cites them; `bench_run` adds the order.
+
+| # | Stage | Script | Question |
+|---|---|---|---|
+| 1 | `fit` | `bench_09_ot_halfstep.sh` | does it fit in VRAM, and at what CPU/GPU split |
+| 2 | `speed` | `bench_01_llamacpp.sh` | raw prompt and generation speed |
+| 3 | `depth` | `bench_11_depth_stream.sh` | speed at depth and the planted-fact check |
+| 4 | `tools` | `bench_14_tools.sh` | does it speak the tool-call protocol |
+| 5 | `agentic` | `bench_05_agentic.sh` | can it code as an agent |
+| 6 | `workflow` | `bench_07_workflow.sh` | does it follow a multi-step procedure |
+| 7 | `hard` | `bench_12_hard.sh` | tasks that still separate the top models |
+| 8 | `horizon` | `bench_08_horizon.sh` | how long a chain of dependent steps stays correct |
+| 9 | `public` | `bench_13_public.sh` | public coding exercises |
+| - | `draft` | `bench_08_spec_offload.sh` | does a drafter speed this model up |
+| - | `router` | `bench_15_router.py` | skill routing from trigger phrases |
+
+`bench_run list` prints this table; `bench_run tools MODEL` runs one stage; `bench_run pipeline
+MODEL,LEADER` writes a queue with stages 4-9 in order.
+
 ## The bench_05 agentic tasks (key to the fleet table below)
 
 The "bench_05 weak spots" column in the fleet table refers to these 12

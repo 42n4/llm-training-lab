@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# bench_run — the benchmark scripts by stage name, in pipeline order.
+#
+# The bench_NN_*.sh files are numbered in the order they were written, not in
+# the order a candidate model goes through them. The numbers stay (results and
+# notes cite them); this command adds the order and the meaning on top:
+#
+#   bench_run list                       the stages, in pipeline order
+#   bench_run tools MODEL                run one stage by name
+#   bench_run pipeline MODEL[,LEADER]    write a queue with stages 4-9 in order
+#
+# Adding or moving a stage = one line in the STAGES table below.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+# order | name | script | how the model is given | default settings | question it answers
+#   models  = MODELS=<aillama profile[,profile]>   (first argument)
+#   profile = one aillama profile; the stage starts the server itself and passes URL=
+#   env     = the script takes MODEL=/path.gguf etc. from the environment or VAR=value arguments
+STAGES='
+1|fit|bench_09_ot_halfstep.sh|env||does it fit in VRAM, and at what CPU/GPU split
+2|speed|bench_01_llamacpp.sh|env||raw prompt and generation speed
+3|depth|bench_11_depth_stream.sh|profile|NEEDLE=1 DEPTHS=1024,8192,24576,49152 RUNS=1 NGEN=128|speed at depth and the planted-fact check
+4|tools|bench_14_tools.sh|models||does it speak the tool-call protocol (run first on an agent candidate)
+5|agentic|bench_05_agentic.sh|models|TASK_TIMEOUT=900|can it code as an agent (12 tasks)
+6|workflow|bench_07_workflow.sh|models|RUNS=3|does it follow a real multi-step procedure
+7|hard|bench_12_hard.sh|models|RUNS=3|nine own tasks that still separate the top models
+8|horizon|bench_08_horizon.sh|models|PARTS=chain NS=1,4,8,16 FILLS=0,16384,32768 REPS=10|how long a chain of dependent steps stays correct
+9|public|bench_13_public.sh|models|SUITE=aider SET=screen|public coding exercises (Aider Polyglot hard 20)
+-|draft|bench_08_spec_offload.sh|env||does a drafter (MTP, DFlash, n-gram) speed this model up
+-|router|bench_15_router.py|env||skill routing from trigger phrases
+'
+PIPELINE_STAGES="tools agentic workflow hard horizon public"
+
+die() { echo "bench_run: $*" >&2; exit 1; }
+
+help() {
+	cat <<EOF
+Usage: bench_run list
+       bench_run STAGE [MODEL[,MODEL...]] [VAR=value ...] [-- script args]
+       bench_run pipeline MODEL[,LEADER] [-o DIR] [-s "stage stage ..."] [--launch]
+       bench_run which STAGE
+
+  list       print the stages in pipeline order with the script behind each
+  STAGE      run one stage (name or its order number); VAR=value pairs go to the
+             script's environment and override the stage defaults
+  pipeline   write a queue script that runs the agent stages in order
+             ($PIPELINE_STAGES), every stage for all models given;
+             a failed stage is recorded and skipped, the rest still run.
+             -o DIR   where the queue and its logs go (default: \$BENCH_OUT or
+                      /tmp/bench-pipeline/<first model>)
+             -s LIST  other stages, e.g. -s "tools agentic hard"
+             --launch start it with qrun at once (default: print the command)
+  which      print the script path of a stage
+
+Examples:
+  bench_run tools my-model
+  bench_run agentic my-model,leader TASK_TIMEOUT=1200
+  bench_run depth my-model DEPTHS=1024,49152,100000
+  MODEL=/path/model.gguf bench_run fit -- -f
+  bench_run pipeline my-model,leader --launch
+EOF
+}
+
+row() {  # NAME|NUMBER -> the table row, or nothing
+	local want=$1 line
+	while IFS= read -r line; do
+		[[ -n $line ]] || continue
+		IFS='|' read -r ord name _ <<< "$line"
+		if [[ $name == "$want" || ( $ord != - && $ord == "$want" ) ]]; then echo "$line"; return 0; fi
+	done <<< "$STAGES"
+	return 1
+}
+
+cmd_list() {
+	local line ord name script how defs what
+	printf '%-3s %-9s %-26s %s\n' "#" "stage" "script" "question"
+	while IFS= read -r line; do
+		[[ -n $line ]] || continue
+		IFS='|' read -r ord name script how defs what <<< "$line"
+		printf '%-3s %-9s %-26s %s\n' "$ord" "$name" "$script" "$what"
+	done <<< "$STAGES"
+	echo
+	echo "pipeline = $PIPELINE_STAGES"
+}
+
+run_stage() {  # STAGE [MODELS] [VAR=value...] [-- args]
+	local line ord name script how defs what
+	line=$(row "$1") || die "unknown stage '$1' (bench_run list)"
+	shift
+	IFS='|' read -r ord name script how defs what <<< "$line"
+	[[ -f $HERE/$script ]] || die "$script is missing in $HERE"
+	local models="" envs=() args=() a
+	# stage defaults first, so that VAR=value arguments override them
+	# shellcheck disable=SC2206
+	[[ -n $defs ]] && envs=($defs)
+	if [[ $how != env && $# -gt 0 && $1 != *=* && $1 != -- ]]; then models=$1; shift; fi
+	while (( $# )); do
+		a=$1; shift
+		if [[ $a == -- ]]; then args=("$@"); break; fi
+		[[ $a == *=* ]] || die "expected VAR=value or --, got '$a'"
+		envs+=("$a")
+	done
+	local runner=(bash)
+	[[ $script == *.py ]] && runner=(python3)
+	case $how in
+		models)
+			[[ -n $models ]] || die "stage '$name' needs a model: bench_run $name MODEL[,MODEL]"
+			echo "== stage $ord $name ($script) MODELS=$models ${envs[*]:-}" >&2
+			exec env "${envs[@]}" MODELS="$models" "${runner[@]}" "$HERE/$script" "${args[@]}"
+			;;
+		profile)
+			[[ -n $models && $models != *,* ]] || die "stage '$name' takes ONE aillama profile"
+			command -v aillama >/dev/null || die "aillama not found"
+			local base rc=0
+			LLAMA_HEALTH_WAIT=${LLAMA_HEALTH_WAIT:-300} aillama switch "$models" >&2 || die "$models does not start"
+			base=$(aillama env | sed -n 's/^export OPENAI_BASE_URL="\(.*\)\/v1".*/\1/p')
+			[[ -n $base ]] || die "no endpoint from 'aillama env'"
+			echo "== stage $ord $name ($script) profile=$models URL=$base ${envs[*]:-}" >&2
+			env "${envs[@]}" URL="$base" "${runner[@]}" "$HERE/$script" "${args[@]}" || rc=$?
+			aillama stop >/dev/null 2>&1 || true
+			exit "$rc"
+			;;
+		env)
+			echo "== stage $ord $name ($script) ${envs[*]:-}" >&2
+			exec env "${envs[@]}" "${runner[@]}" "$HERE/$script" "${args[@]}"
+			;;
+		*) die "bad table row for '$name'" ;;
+	esac
+}
+
+cmd_pipeline() {
+	local models="" out="" stages=$PIPELINE_STAGES launch=0
+	while (( $# )); do
+		case $1 in
+			-o) out=${2:?-o DIR}; shift 2 ;;
+			-s) stages=${2:?-s "stages"}; shift 2 ;;
+			--launch) launch=1; shift ;;
+			-*) die "unknown option $1" ;;
+			*) [[ -z $models ]] || die "one MODEL[,LEADER] argument"; models=$1; shift ;;
+		esac
+	done
+	[[ -n $models ]] || die "pipeline needs MODEL[,LEADER]"
+	local first=${models%%,*} s
+	for s in $stages; do row "$s" >/dev/null || die "unknown stage '$s'"; done
+	local qlib; qlib=$(command -v qlib.sh 2>/dev/null || true)
+	[[ -n $qlib ]] || qlib=$HERE/../bin/qlib.sh
+	[[ -f $qlib ]] || die "qlib.sh not found (needed for a queue)"
+	qlib=$(readlink -f "$qlib")
+	out=${out:-${BENCH_OUT:-/tmp/bench-pipeline/$first}}
+	mkdir -p "$out"
+	local qn="q-pipe-${first//[^A-Za-z0-9_.-]/_}" q
+	q=$out/$qn.sh
+	[[ -e $q ]] && die "$q exists - choose another -o DIR or remove it"
+	{
+		echo '#!/usr/bin/env bash'
+		echo "# written by bench_run pipeline on $(date +%F): $stages for $models"
+		echo 'set -uo pipefail'
+		echo "source $(printf '%q' "$qlib")"
+		echo "q_init $qn"
+		echo "trap 'aillama stop >/dev/null 2>&1; _q_exit' EXIT"
+		echo 'while pgrep -x llama-server >/dev/null; do sleep 15; done'
+		local line ord name script how defs what m
+		for s in $stages; do
+			line=$(row "$s"); IFS='|' read -r ord name script how defs what <<< "$line"
+			case $name in
+				agentic|workflow|hard) defs="$defs WORKROOT=$out/work-$name" ;;
+			esac
+			if [[ $how == models && $name != horizon && $name != public ]]; then
+				echo "q_try continue $(printf '%q' "$ord $name") $(printf '%q ' "$HERE/bench_run" "$name" "$models" $defs)"
+			else
+				# one model per step: these stages are long, and a paired table is built from their own result files
+				for m in ${models//,/ }; do
+					echo "q_try continue $(printf '%q' "$ord $name $m") $(printf '%q ' "$HERE/bench_run" "$name" "$m" $defs)"
+				done
+			fi
+			echo 'aillama stop >/dev/null 2>&1'
+		done
+		echo "q_done $(printf '%q' "pipeline finished for $models")"
+	} > "$q"
+	chmod +x "$q"
+	bash -n "$q" || die "generated queue has a syntax error: $q"
+	echo "queue written: $q"
+	if (( launch )); then
+		command -v qrun >/dev/null || die "qrun not found - start it yourself: bash $q"
+		qrun launch "$q"
+	else
+		echo "start it:      qrun launch $q"
+	fi
+}
+
+case ${1:-} in
+	""|-h|--help) help ;;
+	list) cmd_list ;;
+	which) line=$(row "${2:?which STAGE}") || die "unknown stage '$2'"; IFS='|' read -r _ _ script _ <<< "$line"; echo "$HERE/$script" ;;
+	pipeline) shift; cmd_pipeline "$@" ;;
+	*) run_stage "$@" ;;
+esac
