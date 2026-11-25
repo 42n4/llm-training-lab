@@ -3646,3 +3646,38 @@ until thinking is switched off; check the answer spread before believing a chanc
 
 Verdict: neither use holds. As a router a ~1 GB CPU model gets under half of what the 9B on the GPU gets, at a
 slower decision; and a 9B decision costs the GPU 0.2 s. Ternary weights buy small files, not capability, at this size.
+
+## 2026-11-23/24 — Kintsugi-27B on its own engine against the leader (q-finals-1124, 00:23 → 06:07, rc=0, 0 Xid)
+
+Kintsugi-27B runs on its author's llama.cpp fork (weights stored as 16-bit codes plus rotations, decoded in the
+kernel), profile `kintsugi-27b-128k-i8`: integer prefill plus the DFlash2 drafter, whole in VRAM. Leader:
+`ornith15-128k-mc` (35B MoE, CPU-offloaded experts with the expert cache). Both at a 128K window, same host, same
+session for the 11-24 rows.
+
+| Bench | Kintsugi-27B | Ornith 35B (leader) | Note |
+|---|---|---|---|
+| Tool protocol (`bench_14`) | 6/6 | 6/6 | |
+| Agentic (`bench_05`, 3 passes) | 35/36 | 36/36 | |
+| Workflow (`bench_07`, 3 runs) | all pass | all pass | |
+| Hard suite (`bench_12`, 3 runs) | 26/27 | 7/14 | leader's run was stopped early; `chain14` 3/3 vs 0/3 |
+| Horizon `p_step`, fill 0 / 16K / 32K / 98K | 0.979 / 0.990 / 0.979 / 0.983 | 0.831 / 0.952 / 0.907 / 0.945 | chains of 1-16 dependent steps |
+| Aider hard 20, runs 1 / 2 / 3 | 11 / 13 / 14 = **38/60** | 14 / 11 / 11 = **36/60** | run 2 leader first, run 3 Kintsugi first |
+| Aider minutes per run | 95 / 100 / 84 | 49 / 72 / 67 | |
+| Generation tok/s (256-token answers, 11-23) | ~104 | ~103 | |
+| Prompt tok/s at 16K / 49K / 98K | 2,020 / 1,781 / 1,437 | 2,996 / 2,848 / 2,437 | bench_11, 2 repeats |
+| Planted fact, 1K-98K x2 | 8/8 | 8/8 | |
+| VRAM after the 98K request | 15.2 GB | 15.6 GB | |
+| Polish, 8 fixed prompts, thinking off | 5 clean, 2 with one spelling error, 1 wrong | 2 clean, 2 with one error, 4 with several | graded by hand, below |
+
+Polish detail. Kintsugi: "ulatnną" (ulotną), "Szanowny Sasiado"; the declension of "koń" is wrong in four of seven
+cases (konie, koniu, koń, koń for genitive, dative, accusative, vocative). Leader: declension wrong in one case
+(locative "koni"), but invented words in the e-mail ("Sązadowo", "uprzymne"), six sentences where three were asked
+for, "dwutenu", "promienowaniem", and in the aspect answer "berę", "księagę", "niedokonywany" and a Cyrillic word.
+Both translations are correct for both models.
+
+Reading:
+- The one-run Aider gap of 11-23 (11 vs 14) was run-to-run variation: a single run of 20 exercises moves by 3
+  either way for the same model. Over three runs the two are not separable; Kintsugi takes about 1.5 times longer.
+- Kintsugi is ahead where steps depend on each other (hard suite, horizon) and writes cleaner Polish prose.
+- The leader reads long prompts 1.5-1.7 times faster and finishes coding runs sooner.
+- The generation tok/s that bench_11 printed in this sweep come from ~10-token answers and are not used.
