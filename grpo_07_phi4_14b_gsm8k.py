@@ -5,8 +5,9 @@ os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")  # drop vLLM INFO banner;
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation on the 16 GB card
-os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/gcc")   # flashinfer runtime JIT: nvcc (CUDA 13.3) rejects host gcc-16, -ccbin comes from $CC
-os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/g++")
+os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/gcc")   # flashinfer JIT takes -ccbin from $CC (CUDA 13.4.3, gcc 16)
+os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/g++")
+os.environ.setdefault("UNSLOTH_VLLM_MERGED_ROLLOUT", "0")  # keep rollouts on vLLM LoRA: zoo main defaults to folding LoRA into the bf16 base weights, which rounds away a low-lr delta (update review 2026-11-02)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # The "[ERROR] ... not documented" lines are unsloth-zoo docstring checks, not real errors:
@@ -25,6 +26,7 @@ if os.environ.get("GRPO_ANOMALY") == "1":
     torch.autograd.set_detect_anomaly(True)
     print("GRPO_ANOMALY=1: autograd anomaly detection ON", flush=True)
 from unsloth import FastLanguageModel, is_bfloat16_supported, PatchFastRL
+from lora_precision import base_precision
 PatchFastRL("GRPO", FastLanguageModel)
 from trl import GRPOConfig, GRPOTrainer
 import re
@@ -32,8 +34,6 @@ import os
 from datasets import load_dataset, Dataset
 from tqdm import tqdm
 
-os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
-os.environ["VLLM_USE_V1"] = "0"
 os.environ["FLASH_ATTENTION_USE_FA2"] = "1"
 os.environ["XFORMERS_MEM_EFF_ATTN"] = "0"
 
@@ -59,7 +59,7 @@ _no_vllm = os.environ.get("GRPO_NO_VLLM") == "1"
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
-    load_in_4bit=True,
+    **base_precision("4bit", fast_inference=not _no_vllm),  # LORA_PRECISION=4bit|fp8|bf16
     # no-vLLM path runs HF attention directly; flash_attn package is absent on this
     # host (flex/sdpa stack), so fall back to sdpa there.
     attn_implementation=("sdpa" if _no_vllm else "flash_attention_2"),

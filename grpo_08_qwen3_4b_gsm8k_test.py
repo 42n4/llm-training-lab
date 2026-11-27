@@ -1,14 +1,13 @@
 import os
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation; must precede first CUDA alloc
-os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/gcc")   # flashinfer runtime JIT: nvcc (CUDA 13.3) rejects host gcc-16, -ccbin comes from $CC
-os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/g++")
+os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/gcc")   # flashinfer JIT takes -ccbin from $CC (CUDA 13.4.3, gcc 16)
+os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/g++")
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from datasets import load_dataset
 import torch
 import re
 import os
 
-os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
 seed = 43
 
 model_path = "outputs/lora-grpo-qwen3-4b-2507-r16"  # must match grpo_08_qwen3_4b_gsm8k.py (merged via grpo_merge.py)
